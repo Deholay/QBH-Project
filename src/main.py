@@ -3,6 +3,7 @@ import PitchEstimation
 import MelodyMatching
 import DP
 import HMM
+import DTW
 import os
 import numpy as np
 
@@ -18,8 +19,8 @@ def load_target_data(file_path):
             song_name = parts[0]
             simplified_notation = parts[1].split('/')[0]
             target_beat = [int(digit) for digit in parts[1].split('/')[1]]
-            _, target_diff = MelodyMatching.simplified_notation_to_midi(simplified_notation)
-            targets[song_name] = [target_diff, target_beat]
+            target_midi, target_diff = MelodyMatching.simplified_notation_to_midi(simplified_notation)
+            targets[song_name] = [target_diff, target_beat, target_midi]
     return targets
 
 # Extract MIDI differences from audio files
@@ -51,16 +52,28 @@ def process_audio_to_query_diff(audio_file):
         # 沒有間隔可計算 beat_raw，這裡設為一個預設值或空值
         # query_beat = [1] # 例如，假設最短的音符節拍為 1
         pass # 保持 query_beat 為空，讓後續比較失敗
-    
-    return query_diff, query_beat
 
-def find_closest_song(query_dir, target_file, hmm_prune_gap=0.75):
+    # DTW 用的逐幀音高曲線（不依賴音符切割）
+    onsets_sec = np.asarray(onsets) * time_slot_width
+    contour = DTW.query_contour(f0, f0_times, onsets_sec)
+    note_sec = np.median(np.diff(onsets_sec)) if len(onsets_sec) > 2 else 0.4
+    frame_sec = (f0_times[1] - f0_times[0]) * DTW.DOWNSAMPLE if len(f0_times) > 1 else 0.1
+
+    return query_diff, query_beat, (contour, note_sec, frame_sec)
+
+def zscore(values):
+    a = np.asarray(values, dtype=float)
+    a = np.where(np.isfinite(a), a, np.nan)
+    a = np.nan_to_num(a, nan=np.nanmax(a) if np.isfinite(a).any() else 0.0)
+    return (a - a.mean()) / (a.std() + 1e-9)
+
+def find_closest_song(query_dir, target_file, hmm_prune_gap=0.75, dtw_weight=0.5):
     """
-    Find the closest song for each query audio file by calculating edit distance.
+    Find the closest song for each query audio file by fusing note-level DP/HMM scores with frame-level DTW.
     Calculate the accuracy based on correct matches.
 
-    hmm_prune_gap: 每個轉移的 HMM log 機率比最佳歌曲低超過此值就不跑 DP
-                   (0.75 在 10/15/20 秒資料上不損失準確率，約剪掉 22% 候選；float('inf') = 不剪枝)
+    hmm_prune_gap: 每個轉移的 HMM log 機率比最佳歌曲低超過此值就不跑 DP/DTW (float('inf') = 不剪枝)
+    dtw_weight:    融合時 DTW 的權重 (0 = 只用音符 DP，1 = 只用 DTW)
     """
     targets = load_target_data(target_file)
     results = []
@@ -83,31 +96,32 @@ def find_closest_song(query_dir, target_file, hmm_prune_gap=0.75):
             file_path = os.path.join(query_dir, audio_file) # Convert to full path
 
             print(f"Processing {audio_file}...")
-            query_diff, query_beat = process_audio_to_query_diff(file_path)
+            query_diff, query_beat, (contour, note_sec, frame_sec) = process_audio_to_query_diff(file_path)
 
-            best_match = None
-            best_score = float('inf')
-
-            # HMM 剪枝：先算所有歌的 HMM log 分數，與最佳者的「每個轉移平均差距」> hmm_prune_gap 的歌跳過 DP
+            # HMM 剪枝：先算所有歌的 HMM log 分數，與最佳者的「每個轉移平均差距」> hmm_prune_gap 的歌跳過 DP/DTW
             # (log 分數隨 query 長度累加，所以除以轉移數做正規化)
             hmm_log_scores = {name: HMM.calculate_log_score(query_diff, transition_matrices[name]) for name in targets}
             best_hmm = max(hmm_log_scores.values())
             n_transitions = max(len(query_diff) - 1, 1)
 
+            candidates, note_scores, dtw_scores = [], [], []
             for song_name, target_data in targets.items():
                 hmm_log_score = hmm_log_scores[song_name]
                 if (best_hmm - hmm_log_score) / n_transitions > hmm_prune_gap:
                     continue
 
-                target_diff = target_data[0]
-                target_beat = target_data[1]
+                target_diff, target_beat, target_midi = target_data
                 distanceD, _ = DP.calculate_edit_distance(query_diff, target_diff, d=3)  # Cost 3 is the best
                 distanceB, _ = DP.calculate_edit_distance(query_beat, target_beat, d=3)  # Cost 3 is the best
 
-                score = 0.95 * distanceD + 0.0125 * distanceB + 0.0375 * hmm_log_score
-                if score < best_score:
-                    best_score = score
-                    best_match = song_name
+                candidates.append(song_name)
+                note_scores.append(0.95 * distanceD + 0.0125 * distanceB + 0.0375 * hmm_log_score)
+                dtw_scores.append(DTW.dtw_distance(contour, target_midi, target_beat, note_sec, frame_sec))
+
+            # 音符層級分數與逐幀 DTW 分數各自在候選歌之間做 z-score，再各佔一半（越小越像）
+            score = (1 - dtw_weight) * zscore(note_scores) + dtw_weight * zscore(dtw_scores)
+            best_match = candidates[int(np.argmin(score))]
+            best_score = float(np.min(score))
 
             # Check if the predicted best match is correct
             audio_name = os.path.splitext(audio_file)[0].split("_")[1]
