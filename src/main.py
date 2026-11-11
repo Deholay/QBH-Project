@@ -4,6 +4,7 @@ import MelodyMatching
 import DP
 import HMM
 import os
+import numpy as np
 
 # Load the target data
 def load_target_data(file_path):
@@ -11,7 +12,7 @@ def load_target_data(file_path):
     Load target data and convert the simplified notation to MIDI differences.
     """
     targets = {}
-    with open(file_path, 'r', encoding='utf-8') as f:
+    with open(file_path, 'r', encoding='utf-8-sig') as f:  # utf-8-sig 去除檔頭 BOM，避免第一首歌名讀成 BOM+三輪車
         for line in f:
             parts = line.strip().split()  # Split into song name, simplified notation, and beats
             song_name = parts[0]
@@ -62,46 +63,36 @@ def find_closest_song(query_dir, target_file):
     correct_count = 0  # Counter for correct matches
     total_count = 0    # Counter for total files
 
+    # 只讀一次所有目標歌曲的 HMM；沒有 CSV 的歌直接由簡譜建模，避免 hmm_score=0 → log 變 -inf 而被誤判為最佳
+    transition_matrices = {}
+    for filename in os.listdir(transition_matrix_folder):
+        if filename.endswith(".csv"):
+            song_name = filename[:-4]  # 移除 .csv 副檔名
+            filepath = os.path.join(transition_matrix_folder, filename)
+            transition_matrices[song_name] = np.loadtxt(filepath, delimiter=",", dtype=float)
+    for song_name, target_data in targets.items():
+        if song_name not in transition_matrices:
+            _, transition_matrices[song_name], _ = HMM.build_markov_model(target_data[0], min_prob=0.001, state_range=(-11, 11))
+
     for audio_file in os.listdir(query_dir):
         if audio_file.endswith('.wav'):  # Adjust file extension as needed
             file_path = os.path.join(query_dir, audio_file) # Convert to full path
 
             print(f"Processing {audio_file}...")
-            query_diff, query_beat = process_audio_to_query_diff(file_path) 
+            query_diff, query_beat = process_audio_to_query_diff(file_path)
 
             best_match = None
             best_score = float('inf')
 
-            import numpy as np
-            transition_matrices = {}
-            for filename in os.listdir(transition_matrix_folder):
-                if filename.endswith(".csv"):
-                    song_name = filename[:-4]  # 移除 .csv 副檔名
-                    filepath = os.path.join(transition_matrix_folder, filename)
-                    transition_matrices[song_name] =  np.loadtxt(filepath, delimiter=",", dtype=float)
-                    # print(song_name, transition_matrices[song_name])  # Debug: 查看讀取的 transition matrix
-
             for song_name, target_data in targets.items():
+                hmm_log_score = HMM.calculate_log_score(query_diff, transition_matrices[song_name])
 
-                if song_name in transition_matrices:
-                    transition_matrix = transition_matrices[song_name]
-                    hmm_score = HMM.calculate_score(query_diff, transition_matrix)
-                else:
-                    hmm_score = 0
-                    
                 target_diff = target_data[0]
                 target_beat = target_data[1]
                 distanceD, _ = DP.calculate_edit_distance(query_diff, target_diff, d=3)  # Cost 3 is the best
                 distanceB, _ = DP.calculate_edit_distance(query_beat, target_beat, d=3)  # Cost 3 is the best
 
-                # if len(query_beat) == len(target_beat) and len(query_beat) > 0:
-                #     distanceB, _ = DP.calculate_edit_distance(query_beat, target_beat, d=3)
-                # else:
-                #     distanceB = 4 # 或 float('inf') 或 其他懲罰值
-
-                distanceB, D = DP.calculate_edit_distance(query_beat, target_beat, d=3)  # Cost 3 is the best
-
-                score = 0.95 * distanceD + 0.0125 * distanceB + 0.0375 * np.log(hmm_score)
+                score = 0.95 * distanceD + 0.0125 * distanceB + 0.0375 * hmm_log_score
                 if score < best_score:
                     best_score = score
                     best_match = song_name
@@ -125,9 +116,9 @@ def find_closest_song(query_dir, target_file):
 if __name__ == "__main__":
     # query_dir = r"C:/Users/mrjac/Desktop/丁建均老師信號處理專題/QBH_project/hummingdata/10"
     # query_dir = r"C:/Users/mrjac/Desktop/丁建均老師信號處理專題/QBH_project/hummingdata/15"
-    query_dir = r"C:/Users/mrjac/Desktop/丁建均老師信號處理專題/QBH_project/hummingdata/20"
-    transition_matrix_folder = r"C:/Users/mrjac/Desktop/丁建均老師信號處理專題/QBH_project/Project_in_Lin's_thesis/HMM_midi_diff"
-    target_file = "C:/Users/mrjac/Desktop/丁建均老師信號處理專題/QBH_project/hummingdata/Target_tempo_50_utf-8.txt"
+    query_dir = r"hummingdata/20"
+    transition_matrix_folder = r"Project_in_Lin's_thesis/HMM_midi_diff"
+    target_file = "hummingdata/Target_tempo_50_utf-8.txt"
 
     results = find_closest_song(query_dir, target_file)
 

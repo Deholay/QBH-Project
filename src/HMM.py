@@ -124,18 +124,25 @@ def get_transition_probability(transition_matrix, s, s_next, min_prob=0.001, sta
     if (s < state_range[0] or s > state_range[1]) or (s_next < state_range[0] or s_next > state_range[1]):
         return min_prob  # 若狀態不在模型中，則直接回傳 min_prob
     i, j = int(s + abs(state_range[0])), int(s_next + abs(state_range[0]))
-    return transition_matrix[i, j]
+    # build_markov_model 存的是 matrix[next, cur]（依 column = cur 正規化）
+    return transition_matrix[j, i]
+
+def calculate_log_score(query_diff, transition_matrix):
+    """
+    根據 HMM 計算 query 的 log 匹配分數 log(score_H)，以 log 累加避免長 query 連乘 underflow 成 0
+    """
+    log_score = 0.0
+    for i in range(len(query_diff) - 1):
+        s, s_next = query_diff[i], query_diff[i+1]
+        log_score += np.log(get_transition_probability(transition_matrix, s, s_next))
+
+    return log_score
 
 def calculate_score(query_diff, transition_matrix):
     """
     根據 HMM 計算 query 的匹配分數 score_H
     """
-    score = 1.0
-    for i in range(len(query_diff) - 1):
-        s, s_next = query_diff[i], query_diff[i+1]
-        score *= get_transition_probability(transition_matrix, s, s_next)
-    
-    return score
+    return np.exp(calculate_log_score(query_diff, transition_matrix))
 
 
 
