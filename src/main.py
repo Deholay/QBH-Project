@@ -59,7 +59,8 @@ def process_audio_to_query_diff(audio_file):
     note_sec = np.median(np.diff(onsets_sec)) if len(onsets_sec) > 2 else 0.4
     frame_sec = (f0_times[1] - f0_times[0]) * DTW.DOWNSAMPLE if len(f0_times) > 1 else 0.1
 
-    return query_diff, query_beat, (contour, note_sec, frame_sec)
+    duration_sec = len(data) / rate
+    return query_diff, query_beat, (contour, note_sec, frame_sec), duration_sec
 
 def zscore(values):
     a = np.asarray(values, dtype=float)
@@ -67,12 +68,13 @@ def zscore(values):
     a = np.nan_to_num(a, nan=np.nanmax(a) if np.isfinite(a).any() else 0.0)
     return (a - a.mean()) / (a.std() + 1e-9)
 
-def find_closest_song(query_dir, target_file, hmm_prune_gap=0.75, dtw_weight=0.5):
+def find_closest_song(query_dir, target_file, hmm_prune_gap=0.75, prune_min_sec=12.5, dtw_weight=0.5):
     """
     Find the closest song for each query audio file by fusing note-level DP/HMM scores with frame-level DTW.
     Calculate the accuracy based on correct matches.
 
     hmm_prune_gap: 每個轉移的 HMM log 機率比最佳歌曲低超過此值就不跑 DP/DTW (float('inf') = 不剪枝)
+    prune_min_sec: query 長度短於此值（秒）時不剪枝；10 秒資料剪枝會 76.9% → 67.7%
     dtw_weight:    融合時 DTW 的權重 (0 = 只用音符 DP，1 = 只用 DTW)
     """
     targets = load_target_data(target_file)
@@ -96,18 +98,20 @@ def find_closest_song(query_dir, target_file, hmm_prune_gap=0.75, dtw_weight=0.5
             file_path = os.path.join(query_dir, audio_file) # Convert to full path
 
             print(f"Processing {audio_file}...")
-            query_diff, query_beat, (contour, note_sec, frame_sec) = process_audio_to_query_diff(file_path)
+            query_diff, query_beat, (contour, note_sec, frame_sec), duration_sec = process_audio_to_query_diff(file_path)
 
             # HMM 剪枝：先算所有歌的 HMM log 分數，與最佳者的「每個轉移平均差距」> hmm_prune_gap 的歌跳過 DP/DTW
             # (log 分數隨 query 長度累加，所以除以轉移數做正規化)
+            # 短 query 的 HMM 不可靠，剪枝會先刪掉正確答案，且本來就跑得快 → 不剪枝
             hmm_log_scores = {name: HMM.calculate_log_score(query_diff, transition_matrices[name]) for name in targets}
             best_hmm = max(hmm_log_scores.values())
             n_transitions = max(len(query_diff) - 1, 1)
+            prune_gap = hmm_prune_gap if duration_sec >= prune_min_sec else float('inf')
 
             candidates, note_scores, dtw_scores = [], [], []
             for song_name, target_data in targets.items():
                 hmm_log_score = hmm_log_scores[song_name]
-                if (best_hmm - hmm_log_score) / n_transitions > hmm_prune_gap:
+                if (best_hmm - hmm_log_score) / n_transitions > prune_gap:
                     continue
 
                 target_diff, target_beat, target_midi = target_data
