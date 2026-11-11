@@ -36,7 +36,8 @@ def process_audio_to_query_diff(audio_file):
     onsets, _ = OnsetDetection.Onset_Detection(data, rate, time_slot_width, rho, laMbda, k=3.0, use_median=True)
     onsets = OnsetDetection.refine_onsets(onsets, data, rate, time_slot_width, min_interval=0.15, start_offset=0.2, end_offset=0.2, PLOT_ONSET = False)
 
-    _, pitch_results = PitchEstimation.fft_between_onsets(data, rate, onsets, time_slot_width, PLOT_PITCH=False)
+    f0, f0_times = PitchEstimation.yin_f0(data, rate)
+    pitch_results = PitchEstimation.yin_between_onsets(f0, f0_times, onsets, time_slot_width)
     _, query_diff = PitchEstimation.calculate_midi_differences(pitch_results)
     query_beat_raw = PitchEstimation.calculate_beat_intervals(onsets, time_slot_width)
     

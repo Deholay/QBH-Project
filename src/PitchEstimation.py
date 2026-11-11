@@ -67,6 +67,56 @@ def fft_between_onsets(data, rate, onsets, time_slot_width, L=10, PLOT_PITCH = T
 
     return fft_results, pitch_results
 
+def yin_f0(x, rate, frame=2048, hop=256, threshold=0.15, fmin=70.0, fmax=1000.0):
+    """
+    YIN (de Cheveigné & Kawahara, 2002) frame-level f0.
+    Returns (f0, times): f0 in Hz per frame (np.nan = unvoiced), times = frame centre in seconds.
+    """
+    x = x.astype(float)
+    x = x / (np.max(np.abs(x)) + 1e-9)
+    if len(x) < frame:
+        return np.array([]), np.array([])
+    frames = np.lib.stride_tricks.sliding_window_view(x, frame)[::hop]
+    W = frame // 2
+    tau_min, tau_max = int(rate / fmax), min(int(rate / fmin), W - 1)
+
+    # Difference function d(tau) = sum_{j<W} (x_j - x_{j+tau})^2, via FFT cross-correlation
+    acf = np.fft.irfft(np.fft.rfft(frames, 2 * frame) * np.conj(np.fft.rfft(frames[:, :W], 2 * frame)), 2 * frame)[:, :W]
+    energy = np.cumsum(np.concatenate([np.zeros((len(frames), 1)), frames ** 2], axis=1), axis=1)
+    taus = np.arange(W)
+    diff = energy[:, W][:, None] + (energy[:, taus + W] - energy[:, taus]) - 2 * acf
+
+    # Cumulative mean normalized difference
+    cmnd = np.ones_like(diff)
+    cmnd[:, 1:] = diff[:, 1:] * taus[1:] / np.maximum(np.cumsum(diff[:, 1:], axis=1), 1e-12)
+
+    f0 = np.full(len(frames), np.nan)
+    for i, c in enumerate(cmnd):
+        below = np.where(c[tau_min:tau_max] < threshold)[0]
+        if len(below) == 0:
+            continue  # unvoiced
+        t = below[0] + tau_min
+        while t + 1 < tau_max and c[t + 1] < c[t]:  # walk to the local minimum
+            t += 1
+        y0, y1, y2 = c[t - 1], c[t], c[t + 1]  # parabolic interpolation
+        denom = y0 - 2 * y1 + y2
+        f0[i] = rate / (t + 0.5 * (y0 - y2) / denom if denom else t)
+    times = (np.arange(len(frames)) * hop + frame / 2) / rate
+    return f0, times
+
+def yin_between_onsets(f0, times, onsets, time_slot_width):
+    """
+    Pitch of each note = median of YIN frame f0 (from yin_f0) between consecutive onsets (None if no voiced frame).
+    Replaces fft_between_onsets: its "lowest peak above 20% of max" rule often picked noise / sub-harmonics,
+    producing single-note pitch spikes.
+    """
+    pitch_results = []
+    for i in range(len(onsets) - 1):
+        start, end = onsets[i] * time_slot_width, onsets[i + 1] * time_slot_width
+        voiced = f0[(times >= start) & (times < end) & ~np.isnan(f0)]
+        pitch_results.append(float(np.median(voiced)) if len(voiced) else None)
+    return pitch_results
+
 # Convert pitch to MIDI and calculate MIDI differences
 def calculate_midi_differences(pitch_results):
     # Convert each fundamental frequency to a MIDI note number
