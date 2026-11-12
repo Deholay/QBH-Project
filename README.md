@@ -9,8 +9,9 @@
 __本系統分為三個部分__：
 發端識別(Onset Detection) → 音高估計(Pitch Estimation) → 旋律比對(Melody Matching)
 * __Onset Detection__: 偵測 input 音訊中振幅較高的地方作為起始點 (onset)
-* __Pitch Estimation__: 提取音高資訊並經過 Fourier Transform 轉換為 MIDI 音高差 (diff)
-* __Melody Matching__: 利用 Hidden Markov Model (HMM) 與 Dynamic Programming 得出比對分數排名
+* __Pitch Estimation__: 以 YIN 估計逐幀基頻，取每個音符的音高並轉換為 MIDI 音高差 (diff)
+* __Melody Matching__: 以 HMM 分數剪枝候選歌曲，再將音符層級分數 (DP + HMM) 與逐幀子序列 DTW 分數做 z-score 融合，得出比對分數排名
+* __Streaming QBH__ (選用): 音訊邊進來邊比對，每 2.5 秒跑一次，第一名 confidence 夠高就提前輸出結果
 
 ## 專案結構
 專案中的所有程式統一放在 `src/` 目錄下，以下說明各檔案的用途：
@@ -21,7 +22,9 @@ __本系統分為三個部分__：
 │── MelodyMatching.py                   # 簡譜轉換為 MIDI diff
 │── HMM.py                              # HMM 演算法與分數計算
 │── DP.py                               # DP 匹配與分數計算
-│── main.py                             # 主程式
+│── DTW.py                              # 逐幀音高曲線的子序列 DTW
+│── main.py                             # 主程式 (整段查詢)
+│── StreamingQBH.py                     # 串流查詢：逐 batch 比對 + confidence 提前輸出
 │
 ├── hummingdata/                        # 測試用哼唱音訊資料 (注一)
 │   ├── Target_tempo_50_utf-8.txt       # 目標歌曲資料 (注二)
@@ -75,12 +78,41 @@ python main.py
 ```
 程式會先依照對每首 query 歌曲個別計算 Threshold，之後每首 query 歌曲與 target file 比對完後，輸出正確率與 Best Match
 
+| 資料 | 10 秒 | 15 秒 | 20 秒 |
+|---|---|---|---|
+| 準確率 | 76.9% | 96.3% | 100% |
+
+### 串流查詢 (提前輸出)
+不等整段哼唱錄完：從第 5 秒開始，每 2.5 秒對「目前已收到的音訊」跑一次查詢，把融合分數經 softmax 轉成每首歌的 confidence，第一名 confidence ≥ 95% 就提前輸出，否則等到錄音結束再輸出。
+
+在 `src/` 底下執行 (需使用已安裝 numpy / scipy 的環境，例如專案的 `.venv`)：
+```
+# 1. 對每組資料跑完所有 batch 並存檔 (不提前停止，方便之後掃描門檻)
+python StreamingQBH.py collect hummingdata/10 s10.pkl
+python StreamingQBH.py collect hummingdata/15 s15.pkl
+python StreamingQBH.py collect hummingdata/20 s20.pkl
+
+# 2. 校正 softmax 溫度，並印出各門檻的準確率與平均輸出時間
+python StreamingQBH.py report s10.pkl s15.pkl s20.pkl
+```
+
+門檻 0.95、溫度 0.30 的結果：
+
+| 資料 | 整段準確率 | 串流準確率 | 提前輸出比例 | 平均輸出時間 |
+|---|---|---|---|---|
+| 10 秒 | 76.9% | 76.9% | 31% | 9.0 秒 |
+| 15 秒 | 96.3% | 98.1% | 80% | 10.2 秒 |
+| 20 秒 | 100% | 100% | 95% | 9.6 秒 |
+
+* 溫度與門檻是在同一批資料上選的，沒有獨立測試集，數字可能偏樂觀
+* 每個 batch 平均運算 1.7–2.1 秒，較長的前綴最久 4–6 秒，目前尚未保證即時
+
 ## 使用工具與套件
 * __Python3__
 * __numpy__: 矩陣運算
-* __scipy__: fft 運算與卷積運算
+* __scipy__: 讀取音訊、fft 與卷積運算
 * __matplotlib__: 結果繪圖與可視化
 
 ## __注意事項__
 * 若歌曲資料庫或是需查詢歌曲超過數百首，計算可能耗時
-* 本專案在大於 20 秒歌曲查詢時表現較佳
+* 本專案在大於 20 秒歌曲查詢時表現較佳；使用串流查詢時，多數 20 秒查詢約 10 秒內即可輸出
